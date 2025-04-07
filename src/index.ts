@@ -63,7 +63,7 @@ async function resizeImage(inputPath: string, maxSize: number = 1024): Promise<s
 // Initialize the Ollama client
 const ollama = new Ollama({});
 
-async function analyzeImage(imagePath: string, question: string) {
+async function analyzeImage(imagePaths: string[], question: string) {
   try {
     const prompt = `Given the attached images answer the following question: ${question}`;
     console.log(`Starting prompt: ${prompt}`);
@@ -71,7 +71,7 @@ async function analyzeImage(imagePath: string, question: string) {
     const response = await ollama.generate({
       model: 'gemma3:27b',
       prompt: prompt,
-      images: [imagePath],
+      images: imagePaths,
       stream: false,
     });
 
@@ -80,6 +80,7 @@ async function analyzeImage(imagePath: string, question: string) {
     return answer;
   } catch (error) {
     console.error('Error processing image:', error);
+    throw error;
   }
 }
 
@@ -96,22 +97,30 @@ export async function myAgent(context: any, events: any) {
   });
 
   const params = context.params;
-  const filename = params.filename;
+  const filenames = params.filename;
   const specificQuestion = params.specificQuestion;
 
   let tempPaths: string[] = [];
+  let resizedImagePaths: string[] = [];
 
   try {
-    const originalImagePath = `/tmp/${Date.now()}_image.jpg`;
-    const downloadedImagePath = await downloadFileAxios(filename, originalImagePath);
-    tempPaths.push(downloadedImagePath);
+    const filenameArray = filenames.split(','); // Split the comma-separated string into an array
+    
+    // Process each filename
+    for (const filename of filenameArray) {
+      const trimmedFilename = filename.trim(); // remove whitespace
+      const originalImagePath = `/tmp/${Date.now()}_${trimmedFilename.replace(/[^a-zA-Z0-9.]/g, '_')}`; // Sanitize filename
+      const downloadedImagePath = await downloadFileAxios(trimmedFilename, originalImagePath);
+      tempPaths.push(downloadedImagePath);
 
-    const resizedImagePath = await resizeImage(downloadedImagePath, 1024);
-    if (resizedImagePath !== downloadedImagePath) {
-      tempPaths.push(resizedImagePath);
+      const resizedImagePath = await resizeImage(downloadedImagePath, 1024);
+      resizedImagePaths.push(resizedImagePath);
+      if (resizedImagePath !== downloadedImagePath) {
+        tempPaths.push(resizedImagePath);
+      }
     }
 
-    const answer = await analyzeImage(resizedImagePath, specificQuestion);
+    const answer = await analyzeImage(resizedImagePaths, specificQuestion);
 
     events.emitQueryCompleted({
       data: {
