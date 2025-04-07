@@ -4,158 +4,77 @@ import fs from "fs/promises";
 import fsR from "fs";
 import axios from "axios";
 
-async function downloadFileAxios(
-  fileURL: string,
-  savePath: string
-): Promise<string> {
-  try {
-    const response = await axios({
-      method: "GET",
-      url: fileURL,
-      responseType: "stream",
-    });
-
-    if (response.status !== 200) {
-      throw new Error(
-        `Failed to download file (Axios). Status code: ${response.status}`
-      );
-    }
-
-    const writer = fsR.createWriteStream(savePath);
-    response.data.pipe(writer);
-
-    return new Promise<string>((resolve, reject) => {
-      writer.on("finish", () => {
-        console.log(`Successfully downloaded (Axios) to: ${savePath}`);
-        resolve(savePath);
-      });
-      writer.on("error", (err) => {
-        fs.unlink(savePath).catch(() => {});
-        reject(new Error(`Error writing file (Axios): ${err.message}`));
-      });
-    });
-  } catch (error: any) {
-    console.error(
-      `Error downloading file (Axios) from ${fileURL}: ${error.message}`
-    );
-    throw error;
-  }
-}
-
-async function resizeImage(
-  inputPath: string,
-  maxSize: number = 1024
-): Promise<string> {
-  const outputPath = inputPath.replace(/(\.\w+)$/, "_resized$1");
-  try {
-    const image = sharp(inputPath);
-    const metadata = await image.metadata();
-
-    if (
-      metadata.width &&
-      metadata.height &&
-      (metadata.width > maxSize || metadata.height > maxSize)
-    ) {
-      await image
-        .resize({
-          width: maxSize,
-          height: maxSize,
-          fit: "inside",
-          withoutEnlargement: true,
-        })
-        .toFile(outputPath);
-      console.log(`Resized image saved to ${outputPath}`);
-      return outputPath;
-    } else {
-      console.log("Image is already small enough, no resize needed.");
-      return inputPath; // no resizing needed
-    }
-  } catch (error) {
-    console.error("Error resizing image:", error);
-    throw error;
-  }
-}
-
-// Initialize the Ollama client
 const ollama = new Ollama({});
 
-async function analyzeImage(imagePaths: string[], question: string) {
-  try {
-    const prompt = `Given the attached images answer the following question: ${question}`;
-    console.log(`Starting prompt: ${prompt}`);
-
-    const response = await ollama.generate({
-      model: "gemma3:27b",
-      prompt: prompt,
-      images: imagePaths,
-      stream: false,
+// Download a file from a URL and save it to a specified path
+const downloadFile = async (url: string, path: string): Promise<string> => {
+  const res = await axios({ method: "GET", url, responseType: "stream" });
+  if (res.status !== 200) throw new Error(`Download failed: ${res.status}`);
+  const writer = fsR.createWriteStream(path);
+  res.data.pipe(writer);
+  return new Promise((resolve, reject) => {
+    writer.on("finish", () => resolve(path));
+    writer.on("error", (err) => {
+      fs.unlink(path).catch(() => {});
+      reject(err);
     });
+  });
+};
 
-    const answer = response.response;
-    console.log(`Answer: ${answer}`);
-    return answer;
-  } catch (error) {
-    console.error("Error processing image:", error);
-    throw error;
+// Resize an image to a maximum width or height while maintaining aspect ratio
+const resizeImage = async (path: string, max = 1024): Promise<string> => {
+  const outPath = path.replace(/(\.\w+)$/, "_resized$1");
+  const img = sharp(path);
+  const { width, height } = await img.metadata();
+  if (width! > max || height! > max) {
+    await img.resize({ width: max, height: max, fit: "inside" }).toFile(outPath);
+    return outPath;
   }
-}
+  return path;
+};
 
+// Analyze images using the Gemma3 model and a specific question
+const analyzeImage = async (images: string[], question: string) => {
+  const res = await ollama.generate({
+    model: "gemma3:27b",
+    prompt: `Given the attached images answer the following question: ${question}`,
+    images,
+    stream: false,
+  });
+  return res.response;
+};
+
+// Main agent function
 export async function myAgent(context: any, events: any) {
   events.emitEventCreated({
-    data: {
-      message: `myAgent started`,
-      params: context.params,
-      webhookGroups: context.webhookGroups,
-      agentId: context.agentId,
-      queryId: context.queryId,
-    },
+    data: { ...context, message: "myAgent started" },
     queryId: context.queryId,
   });
 
-  const params = context.params;
-  const filenames = params.filename;
-  const specificQuestion = params.specificQuestion;
-
-  let tempPaths: string[] = [];
-  let resizedImagePaths: string[] = [];
+  const { filename, specificQuestion } = context.params;
+  const urls = filename.split(",");
+  const tempFiles: string[] = [];
+  const resized: string[] = [];
 
   try {
-    const filenameArray = filenames.split(","); // Split the comma-separated string into an array
-
-    // Process each filename
-    let i = 0;
-    for (const filename of filenameArray) {
-      const trimmedFilename = "image_" + i + ".jpg"; 
-      const originalImagePath = `/tmp/${Date.now()}_${trimmedFilename}`; // Sanitize filename
-      const downloadedImagePath = await downloadFileAxios(
-        filename,
-        originalImagePath
-      );
-      tempPaths.push(downloadedImagePath);
-      i++;
-      const resizedImagePath = await resizeImage(downloadedImagePath, 1024);
-      resizedImagePaths.push(resizedImagePath);
-      if (resizedImagePath !== downloadedImagePath) {
-        tempPaths.push(resizedImagePath);
-      }
+    for (let i = 0; i < urls.length; i++) {
+      const rawPath = `/tmp/${Date.now()}_img${i}.jpg`;
+      const dl = await downloadFile(urls[i], rawPath);
+      tempFiles.push(dl);
+      const rs = await resizeImage(dl);
+      if (rs !== dl) tempFiles.push(rs);
+      resized.push(rs);
     }
 
-    const answer = await analyzeImage(resizedImagePaths, specificQuestion);
+    const answer = await analyzeImage(resized, specificQuestion);
 
     events.emitQueryCompleted({
-      data: {
-        message: answer,
-        params: context.params,
-        webhookGroups: context.webhookGroups,
-        agentId: context.agentId,
-        queryId: context.queryId,
-      },
+      data: { ...context, message: answer },
       queryId: context.queryId,
     });
   } catch (err) {
     console.warn("Agent failed:", err);
   } finally {
-    // cleanup any temp files created
-    await Promise.all(tempPaths.map((p) => fs.unlink(p).catch(() => {})));
+    await Promise.all(tempFiles.map(p => fs.unlink(p).catch(() => {})));
   }
 }
